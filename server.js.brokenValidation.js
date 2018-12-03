@@ -7,7 +7,6 @@ var mongo = require('mongodb');
 var mongoose = require('mongoose');
 var bodyParser = require('body-parser');
 const Schema = mongoose.Schema;
-const Url = require('url');
 var cors = require('cors');
 
 var app = express();
@@ -28,38 +27,41 @@ let CounterSchema = new Schema({
 
 let counter = mongoose.model('counter', CounterSchema);
 
-
-// URL Validation function
-let validateUrl = function(url)
-{
-  let isValid = new Promise((resolve, reject) => 
-  {
-    let validFormat = /^http(s)?:\/\/www\.(\w)+\.(\w){2,3}(\/(\w)*)*$/i;
-    if(!validFormat.test(url))
-      resolve(false);
-    let urlToCheck = Url.parse(url);
-    dns.lookup(urlToCheck.host, (err, address, family)=>
-    {
-      if(err)
-        resolve(false);
-      resolve(true);
-    });
-  });
-  return isValid;
-};
-
 const shortUrlSchema = new Schema({
   short: { type: Number },
-  full: 
-  {
+  full: {
     type: String,
     required: true,
-    validate: (url) => {console.log(url); return validateUrl(url);}
+    validate: {
+      isAsync: true,
+      validator: function (url, cb) {
+          dns.lookup(url, (err, address, family) => {
+            console.log('callback for validation:');
+            console.log(cb);
+            console.log('error from validation');
+            console.log(err);
+            let ok = true;
+            let props = {};
+            if(err){ ok = false;}
+            cb(ok, 'INVALID URL');
+        });
+      },
+      message: "url is not valid"
+    }
   }
 });
 
+shortUrlSchema.pre('validate', async function(next){
+
+});
+
 shortUrlSchema.pre('save', async function (next) {
+  console.log(this);
   let doc = this;
+  doc.validate((err, next) => {
+    if (err)
+      next();
+  });
   await counter.findByIdAndUpdate({ _id: 'entityId' }, { $inc: { seq: 1 } }, { new: true, upsert: true })
     .then((count) => {
       doc.short = count.seq;
@@ -73,10 +75,12 @@ shortUrlSchema.pre('save', async function (next) {
 
 const ShortUrl = mongoose.model('ShortUrl', shortUrlSchema);
 
-// Attatch generic middleware
+
 app.use(cors());
 app.use(bodyParser.urlencoded({ extended: true }));
 
+/** this project needs to parse POST bodies **/
+// you should mount the body-parser here
 
 app.use('/public', express.static(process.cwd() + '/public'));
 
@@ -90,8 +94,6 @@ app.get("/api/hello", function (req, res) {
   res.json({ greeting: 'hello API' });
 });
 
-
-// Post new url to shorten
 app.post('/api/shorturl/new', (req, res) => {
   let url = req.body.url;
   ShortUrl.findOne({ full: url }, (err, data) => {
@@ -101,36 +103,33 @@ app.post('/api/shorturl/new', (req, res) => {
       res.json({ original_url: data.full, short_url: data.short });
     else {
       let shortUrl = new ShortUrl({ full: url });
-      shortUrl.save()
-      .then((shortUrl)=> 
-      { 
-        res.json({original_url: shortUrl.full, short_url: shortUrl.short});
-      })
-      .catch((err)=>
-      {
-        res.json({Error: 'Invalid Url'});
+      shortUrl.validate((err) => {
+        if (err)
+          res.json({ error: err });
+        shortUrl.save((err) => {
+          if (err){
+            res.json({ error: err });
+            return;
+          }
+          res.json({ full_url: shortUrl.full, short_url: shortUrl.short });
+        });
       });
     }
   });
 });
 
-// Request shortened url
-app.get("/api/shorturl/:num", (req, res) => 
-{
+app.get("/api/shorturl/:num", (req, res) => {
   let num = Number(req.params.num);
-  ShortUrl.findOne({ short: num }, (err, data) => 
-  {
+  ShortUrl.findOne({ short: num }, (err, data) => {
     if (err) {
       console.log(err);
       res.redirect('back');
     }
-    if (!data) 
-    {
+    if (!data) {
       console.log("requested link doesn't exists");
       res.redirect('back');
     }
-    else 
-    {
+    else {
       res.redirect(data.full);
     }
   });
